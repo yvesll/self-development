@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to ~/.claude/settings.local.json on the target machine and fill in your real DeepSeek key. NEVER commit the real key. settings.local.json is git-ignored by Claude Code by default.",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "sk-REPLACE_WITH_YOUR_DEEPSEEK_KEY"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "_comment": "Merge this statusLine block into your ~/.claude/settings.json. Adjust the python path and the script path to match the target machine.",
+  "statusLine": {
+    "type": "command",
+    "command": "C:/Python311/python.exe C:/Users/<USER>/.claude/statusline_deepseek.py"
+  }
+}

@@ -1,0 +1,7 @@
+# Never commit secrets or local-only Claude Code config
+settings.local.json
+**/settings.local.json
+
+# Runtime cache produced by the statusline script
+.deepseek_balance_cache.json
+**/.deepseek_balance_cache.json
