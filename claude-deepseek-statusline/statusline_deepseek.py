@@ -14,6 +14,13 @@ import json
 import time
 import urllib.request
 
+# Force UTF-8 output: Windows consoles default to cp1252, which cannot encode
+# the emoji/arrows below and would crash the statusline command.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # DeepSeek V4 list price, USD per 1M tokens: (input, output)
 PRICING = {"pro": (0.435, 0.87), "flash": (0.14, 0.28)}
 DEFAULT = PRICING["pro"]
