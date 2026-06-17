@@ -16,9 +16,9 @@ included) because titles are read as Unicode.
 4. **Restart any Claude Code sessions** that were already open — hooks only
    apply to newly started sessions.
 
-That's it. A green row means Claude is working; a yellow row (title bar blinks)
-means a session is waiting for you. Left-click a row to jump to that window.
-Optional: run `python autostart.py` to launch the window at every login.
+That's it. Traffic-light colors: 🔴 red = Claude is working, 🟡 yellow = it
+needs your call, 🟢 green = it's done and it's your turn. Left-click a row to
+jump to that window. Optional: run `python autostart.py` to launch at login.
 
 ## How it works
 
@@ -28,14 +28,19 @@ writes status into a shared file `~/.claude/notifier/state.json` (keyed by
 
 | Hook event | Meaning | Shown as |
 |---|---|---|
-| `UserPromptSubmit` | You submitted — Claude is working | 🟢 Working (calm) |
-| `Notification` | Needs permission / waiting for input | 🟡 Needs you (title bar blinks amber) |
-| `Stop` | A turn finished — your move | 🟡 Needs you (blinks) |
+| `UserPromptSubmit` | You submitted — Claude is working | 🔴 Working |
+| `Notification` | Needs permission / your judgment | 🟡 Needs you |
+| `Stop` | A turn finished — your move | 🟢 Done (your turn) |
 | `SessionEnd` | Session closed | removed |
 
-Green = busy, yellow = needs you. The title bar blinks amber **only** while a
-yellow session is present, so a session that needs you is easy to spot while
-green ones stay quiet.
+Traffic-light reading: 🔴 red = AI busy (wait), 🟡 yellow = needs your call,
+🟢 green = done / your turn. No blinking — the colors and always-on-top
+placement are enough.
+
+**Stale sessions are auto-hidden.** Each row remembers its VSCode window; if
+that window is gone (closed, or left over in state after a reboot) the row is
+hidden automatically — so you won't see phantom "waiting" rows at login when no
+VSCode is even open.
 
 **Page name (which window).** In the VSCode extension the hook reads the
 `VSCODE_PID` env var, finds that window via Win32 `EnumWindows`/`GetWindowTextW`,
@@ -70,6 +75,8 @@ that was already running.
   `#xxxx` (last 4 of the session id) to tell them apart.
 - **Left-click** also flashes the target window's caption/taskbar button so
   your eye lands on it after the switch.
+- Rows for **closed VSCode windows are hidden automatically** (no stale
+  "waiting" entries after a reboot).
 - **`—`** collapse / expand the list.
 - **`✕`** close the window (hooks keep running; relaunch with
   `start-notifier.bat`).

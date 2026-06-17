@@ -178,14 +178,14 @@ def main():
                 "ts": now,
             }
             if event == "Notification":
-                # needs confirmation / waiting for input -> yellow
+                # needs your judgment / permission -> yellow
                 entry["status"] = "needs"
                 entry["message"] = message or "Needs confirmation / waiting for input"
             elif event == "Stop":
-                # turn finished, your move -> yellow
-                entry["status"] = "needs"
+                # turn finished, your move -> green (done)
+                entry["status"] = "done"
                 entry["message"] = "Turn finished — your move"
-            else:  # UserPromptSubmit -> Claude is now working -> green
+            else:  # UserPromptSubmit -> Claude is now working -> red (busy)
                 entry["status"] = "working"
                 prompt = (payload.get("prompt") or "").strip().replace("\n", " ")
                 entry["message"] = (prompt[:60] + "…") if len(prompt) > 60 else (prompt or "Working…")

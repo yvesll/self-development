@@ -21,15 +21,16 @@ POLL_MS = 600
 
 BG = "#1e1e1e"
 BAR_BG = "#2d2d30"
-BAR_ALERT = "#b8860b"   # amber — only blinks while a session needs you
 FG = "#e8e8e8"
 SUB = "#9a9a9a"
 WIDTH = 320
 
 STATUS = {
     # status: (dot color, label, priority — lower sorts first)
-    "needs": ("#faad14", "Needs you", 0),    # yellow — needs your confirmation
-    "working": ("#52c41a", "Working", 1),    # green  — Claude is busy
+    # Traffic-light: red = AI busy (wait), yellow = needs your call, green = done.
+    "needs": ("#faad14", "Needs you", 0),     # yellow — needs your judgment
+    "done": ("#52c41a", "Done", 1),           # green  — finished, your turn
+    "working": ("#ff4d4f", "Working", 2),     # red    — AI is busy
 }
 
 
@@ -66,6 +67,31 @@ def ago(ts):
     if s < 3600:
         return f"{s // 60}m"
     return f"{s // 3600}h"
+
+
+def live_window_pids():
+    """Set of PIDs that currently own a visible, titled top-level window.
+
+    Used to hide stale sessions whose VSCode window is gone (e.g. left over in
+    state.json after a reboot or a window closed without firing SessionEnd).
+    Returns None if it can't be determined (non-Windows) so callers keep all.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        pids = set()
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def cb(hwnd, _):
+            if user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd) > 0:
+                dw = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(dw))
+                pids.add(dw.value)
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(cb), 0)
+        return pids
+    except Exception:
+        return None
 
 
 def _hwnd_for_pid(pid):
@@ -189,7 +215,6 @@ class Notifier:
     def __init__(self, root):
         self.root = root
         self.collapsed = False
-        self.blink_on = False
         self._drag = (0, 0)
         self._sig = None          # signature of last rendered item set
         self._age_labels = []      # (label_widget, prefix, ts) for in-place age updates
@@ -241,7 +266,6 @@ class Notifier:
 
         root.geometry(f"{WIDTH}x28+{self._start_pos[0]}+{self._start_pos[1]}")
         self.refresh()
-        self.blink()
 
     # ---------- dragging ----------
     def start_drag(self, e):
@@ -263,6 +287,12 @@ class Notifier:
     def refresh(self):
         state = load_state()
         items = [v for v in state.values() if v.get("status") in STATUS]
+        # drop sessions whose VSCode window is gone (stale state after a reboot
+        # or a window closed without firing SessionEnd). pid 0 = terminal CLI,
+        # which we can't verify, so keep it.
+        live = live_window_pids()
+        if live is not None:
+            items = [v for v in items if not v.get("vscode_pid") or v["vscode_pid"] in live]
         # one row per window+page: collapse duplicate session ids (subagent /
         # rolled-over sessions for the same VSCode window) keeping the newest.
         collapsed = {}
@@ -275,11 +305,14 @@ class Notifier:
         items.sort(key=lambda v: (STATUS[v["status"]][2], -v.get("ts", 0)))
 
         needs = sum(1 for v in items if v["status"] == "needs")
+        done = sum(1 for v in items if v["status"] == "done")
         working = sum(1 for v in items if v["status"] == "working")
         if needs:
-            self.title.config(text=f"🔔 Claude · {needs} need you")
+            self.title.config(text=f"🟡 Claude · {needs} need you")
+        elif done:
+            self.title.config(text=f"🟢 Claude · {done} your turn")
         elif working:
-            self.title.config(text=f"🟢 Claude · {working} working")
+            self.title.config(text=f"🔴 Claude · {working} working")
         else:
             self.title.config(text="✓ Claude — all clear")
 
@@ -375,22 +408,6 @@ class Notifier:
         old = self.title.cget("text")
         self.title.config(text="📋 Path copied")
         self.root.after(900, lambda: self.title.config(text=old))
-
-    # ---------- attention blink ----------
-    def blink(self):
-        state = load_state()
-        has_wait = any(v.get("status") == "needs" for v in state.values())
-        if has_wait:
-            self.blink_on = not self.blink_on
-            self.bar.config(bg=BAR_ALERT if self.blink_on else BAR_BG)
-            self.title.config(bg=BAR_ALERT if self.blink_on else BAR_BG)
-            self.btn_min.config(bg=BAR_ALERT if self.blink_on else BAR_BG)
-            self.btn_close.config(bg=BAR_ALERT if self.blink_on else BAR_BG)
-        elif self.blink_on or self.bar.cget("bg") != BAR_BG:
-            self.blink_on = False
-            for w in (self.bar, self.title, self.btn_min, self.btn_close):
-                w.config(bg=BAR_BG)
-        self.root.after(700, self.blink)
 
 
 def main():
