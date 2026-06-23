@@ -9,12 +9,19 @@ included) because titles are read as Unicode.
 
 ## Quick start (new machine)
 
-1. Make sure **Python 3** is installed and on PATH, and you use the **Claude
-   Code VSCode extension**.
+1. Make sure **Python 3** (with `tkinter`) is installed and on PATH, and you use
+   the **Claude Code VSCode extension**.
 2. Copy this whole `claude-notifier` folder anywhere on your machine.
-3. Double-click **`setup.bat`** (wires the hooks + opens the window).
+3. Run setup:
+   - **Windows**: double-click **`setup.bat`**
+   - **Linux/macOS**: `sh setup.sh`
 4. **Restart any Claude Code sessions** that were already open — hooks only
    apply to newly started sessions.
+
+> **Linux note:** install `wmctrl` (or `xdotool`) on **X11** to get page titles
+> and click-to-focus (`sudo apt install wmctrl`). On **Wayland** windows can't be
+> queried, so rows show the folder name and click-to-focus is disabled — colors
+> and auto add/remove still work everywhere.
 
 That's it. Traffic-light colors: 🔴 red = Claude is working, 🟡 yellow = it
 needs your call, 🟢 green = it's done and it's your turn. Left-click a row to
@@ -103,17 +110,27 @@ position files can be deleted too.
 
 | File | Role |
 |---|---|
-| `setup.bat` | One-click: wire hooks + launch the window (for a new machine) |
+| `setup.bat` / `setup.sh` | One-click: wire hooks + launch the window (Windows / Linux·macOS) |
 | `hook.py` | Hook handler Claude Code calls; updates the shared state |
 | `notifier.py` | Tkinter HUD (always-on-top, borderless, draggable) |
 | `install-hooks.py` | Safely merge/remove the hooks in global settings.json |
-| `autostart.py` | Add/remove a Windows Startup shortcut |
-| `start-notifier.bat` | Launch the HUD with `pythonw` (no console) |
+| `autostart.py` | Add/remove an autostart entry (Startup shortcut / `.desktop`) |
+| `start-notifier.bat` / `start-notifier.sh` | Launch the HUD (no console / background) |
 
-## Requirements
+## Requirements & platform support
 
-- Windows + Python 3 with `tkinter` (bundled with the standard installer).
-- No third-party packages.
-- The window-focus and page-name features use Win32 APIs, so they are
-  Windows-only. On other OSes the tool still works but shows the cwd folder
-  name and has no click-to-focus.
+Python 3 with `tkinter`, no third-party Python packages. The core (status
+colors, auto add/remove, drag, dedup, stale-hiding) is cross-platform; the
+window-aware extras depend on the OS:
+
+| Feature | Windows | Linux (X11) | Linux (Wayland) / macOS |
+|---|:--:|:--:|:--:|
+| Status colors + auto add/remove | ✅ | ✅ | ✅ |
+| Stale-session hiding | ✅ (window) | ✅ (process) | ✅ (process) |
+| Page name (conversation title) | ✅ Win32 | ✅ via `wmctrl`/`xdotool` | ➖ folder name |
+| Left-click → focus window | ✅ | ✅ via `wmctrl`/`xdotool` | ➖ copies path |
+
+- **Linux/X11**: `sudo apt install wmctrl` (or `xdotool`) enables page titles and
+  click-to-focus. Without them it degrades to the folder name.
+- **Wayland**: querying/activating other windows is blocked by design, so those
+  two features are unavailable; everything else works.

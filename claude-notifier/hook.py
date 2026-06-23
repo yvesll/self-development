@@ -13,90 +13,16 @@ Hooks must finish fast and exit 0 so they never block the session.
 """
 import sys
 import os
-import re
 import json
 import time
+import shutil
+import subprocess
 import tempfile
 import ctypes
 from ctypes import wintypes
 
-# model spec with a context/variant suffix, e.g. claude-opus-4-8[1m]
-_VARIANT_RE = re.compile(r'claude-[a-z]+-[0-9-]+(\[[0-9a-z]+\])')
-
-# Claude list price, USD per 1M tokens: (input, output)
-_PRICING = {
-    "haiku":  (1.00,  5.00),
-    "sonnet": (3.00, 15.00),
-    "opus":   (5.00, 25.00),
-    "fable":  (10.00, 50.00),
-    "mythos": (10.00, 50.00),
-}
-_DEFAULT_PRICE = _PRICING["sonnet"]
-
-
-def _price_for(model_id):
-    m = (model_id or "").lower()
-    for key, pricing in _PRICING.items():
-        if key in m:
-            return pricing
-    return _DEFAULT_PRICE
-
-
-def _parse_transcript(transcript_path):
-    """Return usage stats + ai_title from the JSONL transcript."""
-    in_tok = out_tok = cache_tok = 0
-    cost = 0.0
-    model_id = ""
-    variant = ""        # e.g. "[1m]" — the model's context/variant suffix
-    ai_title = ""
-    if not transcript_path or not os.path.exists(transcript_path):
-        return {"in_tok": 0, "out_tok": 0, "cache_tok": 0, "cost": 0.0,
-                "model_id": "", "ai_title": ""}
-    try:
-        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                # the per-message model field drops the [1m]-style suffix; recover
-                # it from the full spec that appears in the raw line (e.g. the
-                # /model command output). Last hit wins = current selection.
-                vm = _VARIANT_RE.search(line)
-                if vm:
-                    variant = vm.group(1)
-                try:
-                    obj = json.loads(line)
-                except Exception:
-                    continue
-                if obj.get("type") == "ai-title" and not ai_title:
-                    ai_title = obj.get("aiTitle", "")
-                    continue
-                msg = obj.get("message") or {}
-                usage = msg.get("usage")
-                if not usage:
-                    continue
-                mid = msg.get("model", "")
-                if mid and not model_id:
-                    model_id = mid
-                pin, pout = _price_for(mid or model_id)
-                i = usage.get("input_tokens", 0) or 0
-                o = usage.get("output_tokens", 0) or 0
-                cr = usage.get("cache_read_input_tokens", 0) or 0
-                cw = usage.get("cache_creation_input_tokens", 0) or 0
-                in_tok += i
-                out_tok += o
-                cache_tok += cr + cw
-                cost += i / 1_000_000 * pin
-                cost += cr / 1_000_000 * pin * 0.1    # cache read: 10% of input price
-                cost += cw / 1_000_000 * pin * 1.25   # cache write: 125% of input price
-                cost += o / 1_000_000 * pout
-    except Exception:
-        pass
-    if variant and model_id and "[" not in model_id:
-        model_id += variant
-    return {"in_tok": in_tok, "out_tok": out_tok, "cache_tok": cache_tok,
-            "cost": cost, "model_id": model_id, "ai_title": ai_title}
-
+IS_WINDOWS = sys.platform.startswith("win")
+IS_LINUX = sys.platform.startswith("linux")
 
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "notifier")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -158,38 +84,8 @@ def project_name(cwd):
     return name or cwd or "?"
 
 
-def _title_core(title):
-    """Strip the ' - Visual Studio Code' suffix from a window title."""
-    core = title
-    for suffix in (" - Visual Studio Code", " - Code"):
-        if core.endswith(suffix):
-            return core[: -len(suffix)]
-    return core
-
-
-def _title_folder(title):
-    """The folder segment of a VSCode title, e.g.
-    'hook.py - self-development - Visual Studio Code' -> 'self-development'.
-    Drops a trailing remote tag like ' [WSL: Ubuntu]'."""
-    core = re.sub(r'\s*\[[^\]]*\]\s*$', '', _title_core(title))
-    return core.rsplit(" - ", 1)[1].strip() if " - " in core else ""
-
-
-def window_title_for_pid(pid, prefer=""):
-    """VSCode window title for PID, preferring the window for project `prefer`.
-
-    VSCode's main process is SHARED across all its windows, so every window has
-    the same VSCODE_PID. Returning 'the first VSCode window' therefore grabs
-    whichever window is topmost in z-order — often the wrong one (e.g. a WSL
-    window on top while a non-WSL session's hook fires). When `prefer` (the
-    session's project folder) is given we pick the window whose folder segment
-    matches it, so each session is tied to ITS own window.
-
-    Uses Win32 EnumWindows so the Unicode title (incl. Chinese) is read
-    correctly and fast, with no subprocess. Empty string on any failure.
-    """
-    if not pid:
-        return ""
+def _window_title_for_pid_win(pid):
+    """Win32: read the window title for a PID (Unicode-correct, no subprocess)."""
     try:
         user32 = ctypes.windll.user32
         titles = []
@@ -208,23 +104,53 @@ def window_title_for_pid(pid, prefer=""):
             return True
 
         user32.EnumWindows(EnumWindowsProc(cb), 0)
-        vscode = [t for t in titles if "Visual Studio Code" in t or t.endswith(" - Code")]
-        pool = vscode or titles
-        if prefer:
-            p = prefer.lower()
-            for t in pool:                       # strongest: folder segment matches
-                if _title_folder(t).lower() == p:
-                    return t
-            for t in pool:                       # weaker: project name anywhere
-                if p in t.lower():
-                    return t
-            # known project but no matching window (its window was closed, or it
-            # shares the PID with other windows) -> don't borrow another window's
-            # title; let the caller fall back to the project name.
-            return ""
-        return pool[0] if pool else ""
+        for t in titles:
+            if "Visual Studio Code" in t:
+                return t
+        return titles[0] if titles else ""
     except Exception:
         return ""
+
+
+def _window_title_for_pid_linux(pid):
+    """Linux/X11: read the window title via wmctrl or xdotool. '' if unavailable."""
+    def run(args):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=2.0)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    if shutil.which("wmctrl"):
+        for line in run(["wmctrl", "-lp"]).splitlines():
+            parts = line.split(None, 4)
+            if len(parts) >= 5 and parts[2].isdigit() and int(parts[2]) == pid:
+                return parts[4]
+    if shutil.which("xdotool"):
+        lines = [x for x in run(["xdotool", "search", "--pid", str(pid),
+                                 "getwindowname"]).splitlines() if x.strip()]
+        for t in lines:
+            if "Visual Studio Code" in t:
+                return t
+        if lines:
+            return lines[-1]
+    return ""
+
+
+def window_title_for_pid(pid):
+    """Return the editor window title for a PID (the 'which window' identifier).
+
+    Windows uses Win32; Linux/X11 uses wmctrl/xdotool if installed. Returns ''
+    on any failure (Wayland, missing tools, etc.) so the caller falls back to
+    the cwd folder name.
+    """
+    if not pid:
+        return ""
+    if IS_WINDOWS:
+        return _window_title_for_pid_win(pid)
+    if IS_LINUX:
+        return _window_title_for_pid_linux(pid)
+    return ""
 
 
 def page_and_folder(cwd):
@@ -241,10 +167,14 @@ def page_and_folder(cwd):
         pid = int(os.environ.get("VSCODE_PID", "0"))
     except ValueError:
         pid = 0
-    title = window_title_for_pid(pid, prefer=proj)
+    title = window_title_for_pid(pid)
     if not title:
         return proj, ""
-    core = _title_core(title)
+    core = title
+    for suffix in (" - Visual Studio Code", " - Code"):
+        if core.endswith(suffix):
+            core = core[: -len(suffix)]
+            break
     if " - " in core:
         page, folder = core.rsplit(" - ", 1)
     else:
@@ -272,32 +202,12 @@ def main():
 
         if event == "SessionEnd":
             state.pop(sid, None)
-        elif event == "SessionStart":
-            # record model/title but DON'T give the session a status yet: a row
-            # only appears once it actually does something (prompt / turn /
-            # notification), so a just-opened idle session isn't shown as a bare
-            # placeholder with no title or stats.
-            existing = state.get(sid, {})
-            entry = {
-                "session_id": sid,
-                "cwd": cwd,
-                "project": project_name(cwd),
-                "model": (payload.get("model") or "").strip() or existing.get("model", ""),
-                "session_title": (payload.get("session_title") or "").strip()
-                                 or existing.get("session_title", ""),
-                "ts": now,
-            }
-            for k in ("page", "folder", "vscode_pid", "status", "message", "stats"):
-                if k in existing:
-                    entry[k] = existing[k]
-            state[sid] = entry
         elif event in ("Notification", "Stop", "UserPromptSubmit"):
             page, folder = page_and_folder(cwd)
             try:
                 vscode_pid = int(os.environ.get("VSCODE_PID", "0"))
             except ValueError:
                 vscode_pid = 0
-            existing = state.get(sid, {})
             entry = {
                 "session_id": sid,
                 "cwd": cwd,
@@ -305,8 +215,6 @@ def main():
                 "page": page,
                 "folder": folder,
                 "vscode_pid": vscode_pid,
-                "model": existing.get("model", ""),
-                "session_title": existing.get("session_title", ""),
                 "ts": now,
             }
             if event == "Notification":
@@ -322,20 +230,15 @@ def main():
                 prompt = (payload.get("prompt") or "").strip().replace("\n", " ")
                 entry["message"] = (prompt[:60] + "…") if len(prompt) > 60 else (prompt or "Working…")
 
-            # attach usage stats (parse transcript if available, else carry over)
-            transcript = payload.get("transcript_path", "")
-            if transcript:
-                entry["stats"] = _parse_transcript(transcript)
-                if entry["stats"].get("ai_title"):
-                    entry["session_title"] = entry["stats"]["ai_title"]
-            elif sid in state and "stats" in state[sid]:
-                entry["stats"] = state[sid]["stats"]
-                if entry["stats"].get("ai_title") and not entry.get("session_title"):
-                    entry["session_title"] = entry["stats"]["ai_title"]
-
-            # one row per session: keep every session id so multiple Claude
-            # terminals sharing a VSCode window (same active tab/page) each get
-            # their own row, instead of deleting one another.
+            # one row per window+page: drop stale entries that represent the
+            # same VSCode window + conversation under a different session id
+            # (e.g. a subagent/Task session, or a rolled-over session id).
+            key = (entry["vscode_pid"], entry["page"])
+            for other_sid in list(state.keys()):
+                if other_sid != sid:
+                    o = state[other_sid]
+                    if (o.get("vscode_pid"), o.get("page")) == key:
+                        del state[other_sid]
             state[sid] = entry
 
         # prune anything that has been sitting around too long
