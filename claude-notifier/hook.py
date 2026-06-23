@@ -13,6 +13,7 @@ Hooks must finish fast and exit 0 so they never block the session.
 """
 import sys
 import os
+import re
 import json
 import time
 import shutil
@@ -23,6 +24,96 @@ from ctypes import wintypes
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
+
+# model spec with a context/variant suffix, e.g. claude-opus-4-8[1m]
+_VARIANT_RE = re.compile(r'claude-[a-z]+-[0-9-]+(\[[0-9a-z]+\])')
+
+# Claude list price, USD per 1M tokens: (input, output)
+_PRICING = {
+    "haiku":  (1.00,  5.00),
+    "sonnet": (3.00, 15.00),
+    "opus":   (5.00, 25.00),
+    "fable":  (10.00, 50.00),
+    "mythos": (10.00, 50.00),
+}
+_DEFAULT_PRICE = _PRICING["sonnet"]
+
+
+def _price_for(model_id):
+    m = (model_id or "").lower()
+    for key, pricing in _PRICING.items():
+        if key in m:
+            return pricing
+    return _DEFAULT_PRICE
+
+
+def _parse_transcript(transcript_path):
+    """Return usage stats + ai_title from the JSONL transcript."""
+    in_tok = out_tok = cache_tok = 0
+    cost = 0.0
+    model_id = ""
+    variant = ""        # e.g. "[1m]" — the model's context/variant suffix
+    ai_title = ""
+    seen_usage = set()  # (message id, request id) already counted — see below
+    if not transcript_path or not os.path.exists(transcript_path):
+        return {"in_tok": 0, "out_tok": 0, "cache_tok": 0, "cost": 0.0,
+                "model_id": "", "ai_title": ""}
+    try:
+        with open(transcript_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # the per-message model field drops the [1m]-style suffix; recover
+                # it from the full spec that appears in the raw line (e.g. the
+                # /model command output). Last hit wins = current selection.
+                vm = _VARIANT_RE.search(line)
+                if vm:
+                    variant = vm.group(1)
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") == "ai-title" and not ai_title:
+                    ai_title = obj.get("aiTitle", "")
+                    continue
+                msg = obj.get("message") or {}
+                usage = msg.get("usage")
+                if not usage:
+                    continue
+                # Claude Code writes ONE JSONL line per content block of an
+                # assistant turn (text, each tool_use, …) and every line repeats
+                # the SAME message.usage. Count each API response once — keyed on
+                # (message id, request id), the dedup ccusage uses — otherwise the
+                # cost/token totals inflate by the block count of each turn (2-3x
+                # in practice, and it "jumps" because tool-heavy turns inflate more).
+                mkey = (msg.get("id"), obj.get("requestId"))
+                if mkey != (None, None):
+                    if mkey in seen_usage:
+                        continue
+                    seen_usage.add(mkey)
+                mid = msg.get("model", "")
+                if mid:
+                    model_id = mid   # last-wins: tracks the most recently used model
+                pin, pout = _price_for(mid or model_id)
+                i = usage.get("input_tokens", 0) or 0
+                o = usage.get("output_tokens", 0) or 0
+                cr = usage.get("cache_read_input_tokens", 0) or 0
+                cw = usage.get("cache_creation_input_tokens", 0) or 0
+                in_tok += i
+                out_tok += o
+                cache_tok += cr + cw
+                cost += i / 1_000_000 * pin
+                cost += cr / 1_000_000 * pin * 0.1    # cache read: 10% of input price
+                cost += cw / 1_000_000 * pin * 1.25   # cache write: 125% of input price
+                cost += o / 1_000_000 * pout
+    except Exception:
+        pass
+    if variant and model_id and "[" not in model_id:
+        model_id += variant
+    return {"in_tok": in_tok, "out_tok": out_tok, "cache_tok": cache_tok,
+            "cost": cost, "model_id": model_id, "ai_title": ai_title}
+
 
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".claude", "notifier")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -208,6 +299,7 @@ def main():
                 vscode_pid = int(os.environ.get("VSCODE_PID", "0"))
             except ValueError:
                 vscode_pid = 0
+            existing = state.get(sid, {})
             entry = {
                 "session_id": sid,
                 "cwd": cwd,
@@ -215,6 +307,8 @@ def main():
                 "page": page,
                 "folder": folder,
                 "vscode_pid": vscode_pid,
+                "model": existing.get("model", ""),
+                "session_title": existing.get("session_title", ""),
                 "ts": now,
             }
             if event == "Notification":
@@ -229,6 +323,19 @@ def main():
                 entry["status"] = "working"
                 prompt = (payload.get("prompt") or "").strip().replace("\n", " ")
                 entry["message"] = (prompt[:60] + "…") if len(prompt) > 60 else (prompt or "Working…")
+
+            # attach usage stats (parse transcript if available, else carry over)
+            transcript = payload.get("transcript_path", "")
+            if transcript:
+                entry["stats"] = _parse_transcript(transcript)
+                if entry["stats"].get("ai_title"):
+                    entry["session_title"] = entry["stats"]["ai_title"]
+                if entry["stats"].get("model_id") and not entry["model"]:
+                    entry["model"] = entry["stats"]["model_id"]
+            elif "stats" in existing:
+                entry["stats"] = existing["stats"]
+                if existing["stats"].get("ai_title") and not entry.get("session_title"):
+                    entry["session_title"] = existing["stats"]["ai_title"]
 
             # one row per window+page: drop stale entries that represent the
             # same VSCode window + conversation under a different session id
